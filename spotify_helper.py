@@ -33,14 +33,21 @@ def build_recommendation_params(emotion, seed_tracks=None, change_mood=False):
     return params
 
 def recommend_tracks(sp, emotion, seed_tracks=None, change_mood=False):
+    # Build audio feature targets
     params = build_recommendation_params(emotion, seed_tracks, change_mood)
 
-    # Spotify is picky; keep only allowed features
+    # 🔥 ALWAYS use seed tracks, never seed genres
+    # If user didn’t give any seeds → choose stable global hits
+    if seed_tracks:
+        seeds = seed_tracks[:5]
+    else:
+        # Get 3 globally popular tracks guaranteed to exist
+        global_hits = sp.search(q="year:2024", type="track", limit=3)
+        seeds = [t["id"] for t in global_hits["tracks"]["items"]]
+
+    # Build allowed params
     allowed = [
         "limit",
-        "seed_artists",
-        "seed_genres",
-        "seed_tracks",
         "min_tempo",
         "max_tempo",
         "target_valence",
@@ -49,26 +56,26 @@ def recommend_tracks(sp, emotion, seed_tracks=None, change_mood=False):
         "target_acousticness",
         "target_loudness",
     ]
-    clean_params = {k: v for k, v in params.items() if k in allowed}
+
+    feature_params = {k: v for k, v in params.items() if k in allowed}
+
+    # Final recommendation call
+    rec_params = {
+        "limit": 20,
+        "seed_tracks": seeds,
+        **feature_params
+    }
 
     try:
-        results = sp.recommendations(**clean_params)
-        if not results["tracks"]:
-            raise Exception("Empty result")
+        results = sp.recommendations(**rec_params)
     except:
-        # FALLBACK #1 — remove target parameters except valence & energy
-        fallback = {
-            "limit": 20,
-            "seed_genres": ["pop"],
-            "target_valence": clean_params.get("target_valence", 0.5),
-            "target_energy": clean_params.get("target_energy", 0.5),
-        }
-        try:
-            results = sp.recommendations(**fallback)
-        except:
-            # FINAL FALLBACK — pure pop recommendations
-            results = sp.recommendations(limit=20, seed_genres=["pop"])
+        # Absolute fallback
+        results = sp.recommendations(
+            limit=20,
+            seed_tracks=seeds
+        )
 
+    # Build track list
     tracks = []
     ids = []
 
@@ -78,11 +85,12 @@ def recommend_tracks(sp, emotion, seed_tracks=None, change_mood=False):
         tracks.append({
             "id": tid,
             "name": t["name"],
-            "artists": ", ".join(a["name"] for a in t["artists"]),
+            "artists": ", ".join(a["name"] for a in t["artists"]]),
             "uri": t["uri"],
             "preview_url": t.get("preview_url")
         })
 
+    # Get audio features
     audio_features = sp.audio_features(ids)
     for track, feats in zip(tracks, audio_features):
         track["features"] = feats
