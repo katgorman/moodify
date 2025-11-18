@@ -1,0 +1,7 @@
+streamlit>=1.20
+transformers>=4.30
+torch>=1.13
+spotipy>=2.22
+numpy
+pandas
+python-dotenv
