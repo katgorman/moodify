@@ -36,8 +36,8 @@ def recommend_tracks(sp, emotion, seed_tracks=None, change_mood=False):
     # Build audio feature targets
     params = build_recommendation_params(emotion, seed_tracks, change_mood)
 
-    # 🔥 ALWAYS use seed tracks, never seed genres
-    # If user didn’t give any seeds → choose stable global hits
+    # use seed tracks, never seed genres
+    # If user didn’t give any seeds, choose stable global hits
     if seed_tracks:
         seeds = seed_tracks[:5]
     else:
@@ -85,7 +85,7 @@ def recommend_tracks(sp, emotion, seed_tracks=None, change_mood=False):
         tracks.append({
             "id": tid,
             "name": t["name"],
-            "artists": ", ".join(a["name"] for a in t["artists"]]),
+            "artists": ", ".join(a["name"] for a in t["artists"]),
             "uri": t["uri"],
             "preview_url": t.get("preview_url")
         })
