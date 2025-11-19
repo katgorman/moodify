@@ -6,30 +6,32 @@ from dotenv import load_dotenv
 
 load_dotenv()  
 
-st.set_page_config(page_title="Moodify (baseline)", layout="centered")
-st.title("Moodify — baseline prototype")
+st.set_page_config(page_title="Moodify", layout="centered")
+st.title("Moodify")
 
-st.markdown("Connect your Spotify account first to continue.")
-
-# connect to Spotify
 if "spotify" not in st.session_state:
     st.session_state.spotify = None
 if "user_id" not in st.session_state:
     st.session_state.user_id = None
 
 if st.session_state.spotify is None:
-    # show only this button until logged in
+    st.markdown("Connect your Spotify account first to continue.")
+
     if st.button("Connect to Spotify"):
         try:
-            sp = get_spotify_client()
+            sp = get_spotify_client()   # OAuth redirect happens here
             user = sp.current_user()
+
+            # Save everything BEFORE rerunning
             st.session_state.spotify = sp
             st.session_state.user_id = user["id"]
-            st.success("Connected to Spotify successfully!")
+            st.session_state.logged_in = True
+
+            st.rerun()   # now the UI below will show
         except Exception as e:
             st.error(f"Failed to connect to Spotify: {e}")
 
-    st.stop() 
+    st.stop()
 
 # show full UI once Spotify is connected
 st.success("Spotify connected!")
