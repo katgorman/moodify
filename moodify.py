@@ -1,3 +1,4 @@
+# moodify.py
 import streamlit as st
 from emotion import EmotionDetector
 from spotify_helper import (
