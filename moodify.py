@@ -10,7 +10,7 @@ from spotify_helper import (
 import os
 from dotenv import load_dotenv
 
-load_dotenv()  
+load_dotenv()
 
 st.set_page_config(page_title="Moodify", layout="centered")
 st.title("Moodify")
@@ -19,6 +19,8 @@ if "spotify" not in st.session_state:
     st.session_state.spotify = None
 if "user_id" not in st.session_state:
     st.session_state.user_id = None
+if "user_country" not in st.session_state:
+    st.session_state.user_country = None
 
 if st.session_state.spotify is None:
     st.markdown("Connect your Spotify account first to continue.")
@@ -30,6 +32,8 @@ if st.session_state.spotify is None:
 
             st.session_state.spotify = sp
             st.session_state.user_id = user["id"]
+            # store user country (may not exist for some accounts)
+            st.session_state.user_country = user.get("country")
             st.session_state.logged_in = True
 
             st.rerun()
@@ -74,48 +78,61 @@ if st.button("Generate playlist"):
 
     sp = st.session_state.spotify
 
-    seed_tracks = None
+    # detect market/country if available; recommend_tracks will work w/out it
+    market = st.session_state.get("user_country")
 
-    emotion = st.session_state.emotion_label
+    detected = st.session_state.emotion_label
+
+    if mode == "Change my mood (cheer me up / calm me down)":
+        from spotify_helper import MOOD_CHANGE_MAP
+        target = MOOD_CHANGE_MAP.get(detected, detected)   # fallback to self
+    else:
+        target = detected  # match mood mode
 
     tracks = recommend_tracks(
         sp,
-        top_tracks=None,
-        seed_tracks=None,
-        change_mood=emotion # pass mood name
+        market=market,
+        change_mood=target,
     )
 
     st.session_state.results = tracks
 
 # show results
 results = st.session_state.results
-if results:
+if results and results.get("tracks"):
     st.subheader("Top recommendations + explanations")
 
     for t in results["tracks"][:10]:
         info = explain_track_features(t, st.session_state.emotion_label)
-        st.write(f"+++ {info['name']} — {info['artists']}")
+        st.write(f"{info['name']} - {info['artists']}")
         st.write(f"Preview: {info['preview_url']}")
         st.json(info)
         st.markdown("---")
 
     if st.button("Create Spotify Playlist"):
-        uris = [t["uri"] for t in results["tracks"] if t.get("uri")]
+        # collect URIs safely
+        uris = [t.get("uri") for t in results["tracks"] if t.get("uri")]
 
         if not uris:
             st.error("No valid or playable tracks were returned. Try a different mood.")
             st.stop()
 
-        playlist_name = f"Moodify — {st.session_state.emotion_label}"
+        playlist_name = f"Moodify: {st.session_state.emotion_label or 'playlist'}"
         description = f"Generated from: {text}"
 
-        playlist = create_playlist_and_add_tracks(
-            st.session_state.spotify,
-            st.session_state.user_id,
-            playlist_name,
-            uris,
-            description=description
-        )
-
-        st.success("Playlist created!")
-        st.markdown(f"[Open Playlist]({playlist['external_urls']['spotify']})")
+        try:
+            playlist = create_playlist_and_add_tracks(
+                st.session_state.spotify,
+                st.session_state.user_id,
+                playlist_name,
+                uris,
+                description=description
+            )
+            st.success("Playlist created!")
+            st.markdown(f"[Open Playlist]({playlist['external_urls']['spotify']})")
+        except Exception as e:
+            st.error(f"Failed to create playlist: {e}")
+else:
+    # helpful hint when there are no results yet
+    if st.session_state.results is not None:
+        st.info("No recommendations were returned. Try toggling mode, simplifying the request, or using a different input text.")
