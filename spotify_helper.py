@@ -28,39 +28,103 @@ def normalize_ids(seeds):
     return cleaned
 
 
-def recommend_tracks(sp, top_tracks=None, seed_tracks=None, change_mood=None):
+def recommend_tracks(
+    sp,
+    market="US",
+    top_tracks=None,
+    seed_tracks=None,
+    change_mood=None,
+    limit=20,
+    fallback_genres=("pop", "indie", "rock"),
+):
     """
-    Return Spotify recommendations safely.
-    Ensures at least one valid seed and removes invalid parameters.
+    A robust Spotify recommendation generator w/:
+    - market validation
+    - seed validation + playability checks
+    - safe mood parameter filtering
+    - guaranteed fallback seeds
+    - protection against 404/invalid parameter errors - this is giving me SHIT
     """
-    # Step 1: normalize seeds
-    seeds = normalize_ids(seed_tracks or top_tracks or [])[:5]
+    # HELPER: check track exists + is playable 
+    def validate_track(track_id):
+        try:
+            t = sp.track(track_id, market=market)
+            if not t:
+                return False
+            if t.get("is_playable") is False:
+                return False
+            # Spotify sometimes omits 'is_playable'; fallback check:
+            if t.get("restrictions", {}).get("reason") in ("market", "premium"):
+                return False
+            return True
+        except Exception:
+            return False
 
-    # Step 2: valid mood parameters
-    mood_kwargs = EMOTION_FEATURES.get(change_mood, {}).copy() if change_mood in EMOTION_FEATURES else {}
+    # Step 1: normalize IDs
+    raw_seeds = normalize_ids(seed_tracks or top_tracks or [])
+
+    # Step 2: validate seeds against API & market
+    valid_seeds = [tid for tid in raw_seeds if validate_track(tid)]
+
+    # keep max 5
+    valid_seeds = valid_seeds[:5]
+
+    # Step 3: clean mood params
+    mood_kwargs = (
+        EMOTION_FEATURES.get(change_mood, {}).copy()
+        if change_mood in EMOTION_FEATURES
+        else {}
+    )
     mood_kwargs = {k: v for k, v in mood_kwargs.items() if v is not None}
 
-    # Step 3: determine which seeds to use
-    if seeds:
-        return sp.recommendations(limit=20, seed_tracks=seeds, **mood_kwargs)
-    
-    # fallback to Spotify-approved genres
-    fallback_genres = ["pop", "indie", "rock"]
-    return sp.recommendations(limit=20, seed_genres=fallback_genres, **mood_kwargs)
+
+    # HELPER safe wrapper around sp.recommendations
+    def safe_recs(**kwargs):
+        """
+        Spotify sometimes returns 404 for no reason.
+        This wrapper tries the request safely.
+        """
+        try:
+            return sp.recommendations(limit=limit, market=market, **kwargs)
+        except Exception as e:
+            print("Spotify recommendation error:", e)
+            return None
+
+    # Step 4: Use validated seed tracks first
+    if valid_seeds:
+        result = safe_recs(seed_tracks=valid_seeds, **mood_kwargs)
+        if result and result.get("tracks"):
+            return result
+
+    # Step 5: fallback to genres 
+    result = safe_recs(seed_genres=list(fallback_genres), **mood_kwargs)
+    if result and result.get("tracks"):
+        return result
+
+    # Step 6: last-resort fallback
+    # use Spotify's required minimum: one seed of any kind
+    print("Emergency fallback: using seed_genres=['pop']")
+    return safe_recs(seed_genres=["pop"]) or {"tracks": []}
 
 
-def create_playlist_and_add_tracks(sp, user_id, playlist_name, track_ids, public=False, description=""):
-    """Create a playlist and add tracks."""
+def create_playlist_and_add_tracks(sp, user_id, name, track_ids, description=None):
+    track_ids = normalize_ids(track_ids or [])
+
+    if not track_ids:
+        raise ValueError("No valid tracks were returned, cannot add to playlist.")
+
     playlist = sp.user_playlist_create(
         user=user_id,
-        name=playlist_name,
-        public=public,
-        description=description
+        name=name,
+        public=False,   
+        description=description or ""
     )
+
     sp.playlist_add_items(
         playlist_id=playlist["id"],
-        items=normalize_ids(track_ids)[:100]
+        items=track_ids[:100]
     )
+
     return playlist
 
 
