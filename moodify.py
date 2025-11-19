@@ -13,6 +13,19 @@ from dotenv import load_dotenv
 load_dotenv()
 
 st.set_page_config(page_title="Moodify", layout="centered")
+
+st.markdown("""
+    <style>
+    html, body, [class*="css"] {
+        font-family: 'Calibri', sans-serif;
+    }
+
+    h1, h2, h3, h4, h5, h6 {
+        font-family: 'Calibri', sans-serif !important;
+    }
+    </style>
+""", unsafe_allow_html=True)
+
 st.title("Moodify")
 
 if "spotify" not in st.session_state:
