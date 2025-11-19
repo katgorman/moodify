@@ -33,19 +33,19 @@ def build_recommendation_params(emotion, seed_tracks=None, change_mood=False):
     return params
 
 def recommend_tracks(sp, emotion, seed_tracks=None, change_mood=False):
-    # Build audio feature targets
+    # build audio feature targets
     params = build_recommendation_params(emotion, seed_tracks, change_mood)
 
     # use seed tracks, never seed genres
-    # If user didn’t give any seeds, choose stable global hits
+    # if the user didn’t give any seeds, choose stable global hits
     if seed_tracks:
         seeds = seed_tracks[:5]
     else:
-        # Get 3 globally popular tracks guaranteed to exist
+        # get 3 globally popular tracks guaranteed to exist
         global_hits = sp.search(q="year:2024", type="track", limit=3)
         seeds = [t["id"] for t in global_hits["tracks"]["items"]]
 
-    # Build allowed params
+    # allowed params
     allowed = [
         "limit",
         "min_tempo",
@@ -59,7 +59,7 @@ def recommend_tracks(sp, emotion, seed_tracks=None, change_mood=False):
 
     feature_params = {k: v for k, v in params.items() if k in allowed}
 
-    # Final recommendation call
+    # final recommendation call
     rec_params = {
         "limit": 20,
         "seed_tracks": seeds,
@@ -69,13 +69,13 @@ def recommend_tracks(sp, emotion, seed_tracks=None, change_mood=False):
     try:
         results = sp.recommendations(**rec_params)
     except:
-        # Absolute fallback
+        # absolute fallback
         results = sp.recommendations(
             limit=20,
             seed_tracks=seeds
         )
 
-    # Build track list
+    # build track list
     tracks = []
     ids = []
 
@@ -90,7 +90,7 @@ def recommend_tracks(sp, emotion, seed_tracks=None, change_mood=False):
             "preview_url": t.get("preview_url")
         })
 
-    # Get audio features
+    # get audio features
     audio_features = sp.audio_features(ids)
     for track, feats in zip(tracks, audio_features):
         track["features"] = feats
