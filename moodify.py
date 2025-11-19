@@ -1,6 +1,11 @@
 import streamlit as st
 from emotion import EmotionDetector
-from spotify_helper import get_spotify_client, recommend_tracks, create_playlist_and_add_tracks, explain_track_features
+from spotify_helper import (
+    get_spotify_client,
+    recommend_tracks,
+    create_playlist_and_add_tracks,
+    explain_track_features
+)
 import os
 from dotenv import load_dotenv
 
@@ -19,21 +24,19 @@ if st.session_state.spotify is None:
 
     if st.button("Connect to Spotify"):
         try:
-            sp = get_spotify_client()   # OAuth redirect happens here
+            sp = get_spotify_client()
             user = sp.current_user()
 
-            # Save everything BEFORE rerunning
             st.session_state.spotify = sp
             st.session_state.user_id = user["id"]
             st.session_state.logged_in = True
 
-            st.rerun()   # now the UI below will show
+            st.rerun()
         except Exception as e:
             st.error(f"Failed to connect to Spotify: {e}")
 
     st.stop()
 
-# show full UI once Spotify is connected
 st.success("Spotify connected!")
 
 mode = st.radio("Playlist behavior", ["Match my mood", "Change my mood (cheer me up / calm me down)"])
@@ -58,24 +61,33 @@ if st.button("Generate playlist"):
     st.json(res["scores"])
 
     sp = st.session_state.spotify
-
     change_mood = (mode == "Change my mood (cheer me up / calm me down)")
-    tracks = recommend_tracks(sp, res["top"], seed_tracks=None, change_mood=change_mood)
+
+    # --- FIX: ensure valid seed tracks ---
+    if isinstance(res["top"], str):
+        # Emotion string, fallback to genres in helper
+        seed_tracks = None
+    elif isinstance(res["top"], list):
+        # list of track dicts
+        seed_tracks = [t["id"] for t in res["top"] if "id" in t]
+    else:
+        seed_tracks = None
+
+    tracks = recommend_tracks(sp, top_tracks=seed_tracks, seed_tracks=None, change_mood=change_mood)
 
     st.subheader("Top recommendations with explanations")
-    for t in tracks[:10]:
-        st.write(f"### {t['name']} — {t['artists']}")
-        st.write(f"Preview: {t['preview_url']}")
-        explanation = explain_track_features(t, res['top'])
-        st.write(explanation)
+    for t in tracks["tracks"][:10]:
+        info = explain_track_features(t, res["top"])
+        st.write(f"### {info['name']} — {info['artists']}")
+        st.write(f"Preview: {info['preview_url']}")
+        st.write(info)
         st.markdown("---")
 
-    # create playlist button
     if st.button("Create Spotify Playlist Now"):
         playlist_name = f"Moodify — {res['top']} mood"
         description = f"Generated from: \"{text}\""
 
-        uris = [t["uri"] for t in tracks]
+        uris = [t["uri"] for t in tracks["tracks"]]
 
         playlist = create_playlist_and_add_tracks(
             sp,

@@ -1,5 +1,3 @@
-# spotify_helper.py
-import os
 import spotipy
 from spotipy.oauth2 import SpotifyOAuth
 
@@ -13,127 +11,81 @@ EMOTION_FEATURES = {
 
 SCOPE = "playlist-modify-private playlist-modify-public user-read-private"
 
+
 def get_spotify_client():
+    """Return an authenticated Spotify client."""
     return spotipy.Spotify(auth_manager=SpotifyOAuth(scope=SCOPE))
 
-def build_recommendation_params(emotion, seed_tracks=None, change_mood=False):
-    params = {}
-    features = EMOTION_FEATURES.get(emotion, {})
-    params.update(features)
 
-    if change_mood and "target_valence" in params:
-        params["target_valence"] = 1.0 - params["target_valence"]
+def normalize_ids(seeds):
+    """
+    Convert a list of track dicts or strings into a list of track IDs.
+    """
+    cleaned = []
+    for s in seeds:
+        if isinstance(s, dict) and "id" in s:
+            cleaned.append(s["id"])
+        elif isinstance(s, str):
+            cleaned.append(s)
+    return cleaned
 
-    if seed_tracks:
-        params["seed_tracks"] = seed_tracks[:5]
-    else:
-        params["seed_genres"] = ["pop", "indie", "rock"]
 
-    params["limit"] = 20
-    return params
+def recommend_tracks(sp, top_tracks=None, seed_tracks=None, change_mood=None):
+    """
+    Return recommended tracks using valid Spotify seeds.
+    Falls back to default genres if no valid track IDs exist.
+    """
+    # Normalize seeds
+    seeds = normalize_ids(seed_tracks or top_tracks or [])[:5]
+    seeds = [s for s in seeds if isinstance(s, str) and len(s) >= 10]
 
-def recommend_tracks(sp, emotion, seed_tracks=None, change_mood=False):
-    # build audio feature targets
-    params = build_recommendation_params(emotion, seed_tracks, change_mood)
-
-    # use seed tracks, never seed genres
-    # if the user didn’t give any seeds, choose stable global hits
-    if seed_tracks:
-        seeds = seed_tracks[:5]
-    else:
-        # get 3 globally popular tracks guaranteed to exist
-        global_hits = sp.search(q="year:2024", type="track", limit=3)
-        seeds = [t["id"] for t in global_hits["tracks"]["items"]]
-
-    # allowed params
-    allowed = [
-        "limit",
-        "min_tempo",
-        "max_tempo",
-        "target_valence",
-        "target_energy",
-        "target_danceability",
-        "target_acousticness",
-        "target_loudness",
-    ]
-
-    feature_params = {k: v for k, v in params.items() if k in allowed}
-
-    # final recommendation call
-    rec_params = {
-        "limit": 20,
-        "seed_tracks": seeds,
-        **feature_params
-    }
-
-    try:
-        results = sp.recommendations(**rec_params)
-    except:
-        # absolute fallback
-        results = sp.recommendations(
+    # If no valid seeds, fallback to genres
+    if not seeds:
+        return sp.recommendations(
             limit=20,
-            seed_tracks=seeds
+            seed_genres=["pop", "indie", "rock"],
+            **(EMOTION_FEATURES.get(change_mood, {}))
         )
 
-    # build track list
-    tracks = []
-    ids = []
+    mood_kwargs = {}
+    if change_mood in EMOTION_FEATURES:
+        mood_kwargs.update(EMOTION_FEATURES[change_mood])
 
-    for t in results["tracks"]:
-        tid = t["id"]
-        ids.append(tid)
-        tracks.append({
-            "id": tid,
-            "name": t["name"],
-            "artists": ", ".join(a["name"] for a in t["artists"]),
-            "uri": t["uri"],
-            "preview_url": t.get("preview_url")
-        })
+    return sp.recommendations(
+        limit=20,
+        seed_tracks=seeds,
+        **mood_kwargs
+    )
 
-    # get audio features
-    audio_features = sp.audio_features(ids)
-    for track, feats in zip(tracks, audio_features):
-        track["features"] = feats
 
-    return tracks
-
-# generate explanation text from real audio features
-def explain_track_features(track, target_emotion):
-    feats = track["features"]
-    if not feats:
-        return "No audio feature data available."
-
-    valence = feats.get("valence")
-    energy = feats.get("energy")
-    dance = feats.get("danceability")
-    acoustic = feats.get("acousticness")
-    tempo = feats.get("tempo")
-    loud = feats.get("loudness")
-
-    explanation = []
-
-    explanation.append(f"Valence {valence:.2f} — {'positive/uplifting' if valence > 0.6 else 'moody/low'}")
-    explanation.append(f"Energy {energy:.2f} — {'high intensity' if energy > 0.6 else 'calmer'}")
-    explanation.append(f"Tempo {tempo:.0f} BPM")
-    explanation.append(f"Danceability {dance:.2f}")
-    explanation.append(f"Acousticness {acoustic:.2f}")
-    explanation.append(f"Loudness {loud:.1f} dB")
-
-    # emotion-specific reasoning layer
-    if target_emotion == "happy":
-        explanation.append("→ This matches *happy* because of high valence and energy.")
-    elif target_emotion == "sad":
-        explanation.append("→ This fits *sad* due to lower valence and softer loudness.")
-    elif target_emotion == "relaxed":
-        explanation.append("→ Suitable for *relaxed* mood with acousticness and moderate tempo.")
-    elif target_emotion == "anxious":
-        explanation.append("→ Helps with *anxious* states via moderate energy and rhythmic stability.")
-    elif target_emotion == "angry":
-        explanation.append("→ Fits *angry* mood due to high energy and loudness.")
-
-    return " | ".join(explanation)
-
-def create_playlist_and_add_tracks(sp, user_id, name, track_uris, public=False, description=""):
-    playlist = sp.user_playlist_create(user=user_id, name=name, public=public, description=description)
-    sp.playlist_add_items(playlist["id"], track_uris)
+def create_playlist_and_add_tracks(sp, user_id, playlist_name, track_ids, public=False, description=""):
+    """
+    Create a playlist and add tracks.
+    Returns the playlist object.
+    """
+    playlist = sp.user_playlist_create(
+        user=user_id,
+        name=playlist_name,
+        public=public,
+        description=description
+    )
+    sp.playlist_add_items(
+        playlist_id=playlist["id"],
+        items=normalize_ids(track_ids)[:100]
+    )
     return playlist
+
+
+def explain_track_features(track, emotion=None):
+    """
+    Return a simplified dictionary of key track info.
+    """
+    return {
+        "name": track.get("name"),
+        "artists": ", ".join([a["name"] for a in track.get("artists", [])]),
+        "id": track.get("id"),
+        "uri": track.get("uri"),
+        "popularity": track.get("popularity"),
+        "preview_url": track.get("preview_url"),
+        "related_emotion": emotion
+    }
