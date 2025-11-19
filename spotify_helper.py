@@ -18,9 +18,7 @@ def get_spotify_client():
 
 
 def normalize_ids(seeds):
-    """
-    Convert a list of track dicts or strings into a list of track IDs.
-    """
+    """Convert a list of track dicts or strings into a list of track IDs."""
     cleaned = []
     for s in seeds:
         if isinstance(s, dict) and "id" in s:
@@ -32,37 +30,27 @@ def normalize_ids(seeds):
 
 def recommend_tracks(sp, top_tracks=None, seed_tracks=None, change_mood=None):
     """
-    Return recommended tracks using valid Spotify seeds.
-    Falls back to default genres if no valid track IDs exist.
+    Return Spotify recommendations safely.
+    Ensures at least one valid seed and removes invalid parameters.
     """
-    # Normalize seeds
+    # Step 1: normalize seeds
     seeds = normalize_ids(seed_tracks or top_tracks or [])[:5]
-    seeds = [s for s in seeds if isinstance(s, str) and len(s) >= 10]
 
-    # If no valid seeds, fallback to genres
-    if not seeds:
-        return sp.recommendations(
-            limit=20,
-            seed_genres=["pop", "indie", "rock"],
-            **(EMOTION_FEATURES.get(change_mood, {}))
-        )
+    # Step 2: valid mood parameters
+    mood_kwargs = EMOTION_FEATURES.get(change_mood, {}).copy() if change_mood in EMOTION_FEATURES else {}
+    mood_kwargs = {k: v for k, v in mood_kwargs.items() if v is not None}
 
-    mood_kwargs = {}
-    if change_mood in EMOTION_FEATURES:
-        mood_kwargs.update(EMOTION_FEATURES[change_mood])
-
-    return sp.recommendations(
-        limit=20,
-        seed_tracks=seeds,
-        **mood_kwargs
-    )
+    # Step 3: determine which seeds to use
+    if seeds:
+        return sp.recommendations(limit=20, seed_tracks=seeds, **mood_kwargs)
+    
+    # fallback to Spotify-approved genres
+    fallback_genres = ["pop", "indie", "rock"]
+    return sp.recommendations(limit=20, seed_genres=fallback_genres, **mood_kwargs)
 
 
 def create_playlist_and_add_tracks(sp, user_id, playlist_name, track_ids, public=False, description=""):
-    """
-    Create a playlist and add tracks.
-    Returns the playlist object.
-    """
+    """Create a playlist and add tracks."""
     playlist = sp.user_playlist_create(
         user=user_id,
         name=playlist_name,
@@ -77,9 +65,7 @@ def create_playlist_and_add_tracks(sp, user_id, playlist_name, track_ids, public
 
 
 def explain_track_features(track, emotion=None):
-    """
-    Return a simplified dictionary of key track info.
-    """
+    """Return a simplified dictionary of key track info."""
     return {
         "name": track.get("name"),
         "artists": ", ".join([a["name"] for a in track.get("artists", [])]),

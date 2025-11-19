@@ -63,12 +63,10 @@ if st.button("Generate playlist"):
     sp = st.session_state.spotify
     change_mood = (mode == "Change my mood (cheer me up / calm me down)")
 
-    # --- FIX: ensure valid seed tracks ---
+    # --- ensure valid seeds ---
     if isinstance(res["top"], str):
-        # Emotion string, fallback to genres in helper
-        seed_tracks = None
+        seed_tracks = None  # fallback to genres
     elif isinstance(res["top"], list):
-        # list of track dicts
         seed_tracks = [t["id"] for t in res["top"] if "id" in t]
     else:
         seed_tracks = None
