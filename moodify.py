@@ -26,7 +26,7 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-st.title("Moodify")
+st.title("Welcome to Moodify! 🎧")
 
 if "spotify" not in st.session_state:
     st.session_state.spotify = None
@@ -55,13 +55,20 @@ if st.session_state.spotify is None:
 
     st.stop()
 
+st.markdown(
+    """
+    ✨✨ Generate Spotify playlists based on your listening habits and the vibe you're trying to create.  
+    Describe how you feel like, *“I am anxious and trying to unwind before bed”* — and Moodify matches you with songs that reinforce or shift your mood. ✨✨
+    """,
+)
+
 st.success("Spotify connected!")
 
-mode = st.radio("Playlist behavior", ["Match my mood", "Change my mood (cheer me up / calm me down)"])
+mode = st.radio("Choose your playlist's behavior", ["Match my mood — keep your current vibe", "Change my mood — cheer up or calm down"])
 
 text = st.text_area(
-    "Describe your mood / request",
-    value="I'm feeling nervous but need motivation to study",
+    "Tell Moodify how you feel or how you want to feel:",
+    placeholder="I'm nervous but need motivation to study...",
     height=120
 )
 
