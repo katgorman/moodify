@@ -8,6 +8,7 @@ from spotify_helper import (
     explain_track_features
 )
 import os
+import time
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -17,14 +18,72 @@ st.set_page_config(page_title="Moodify", layout="centered")
 st.markdown("""
     <style>
     html, body, [class*="css"] {
-        font-family: 'Calibri', sans-serif;
+        font-family: 'Montserrat', sans-serif;
     }
 
     h1, h2, h3, h4, h5, h6 {
-        font-family: 'Calibri', sans-serif !important;
+        font-family: 'Montserrat', sans-serif !important;
     }
     </style>
 """, unsafe_allow_html=True)
+
+#Working on 
+if "theme" not in st.session_state:
+    st.session_state.theme = "light"
+
+mode = st.sidebar.radio("Customize Theme", ["light", "dark"], index=0 if st.session_state.theme=="light" else 1)
+st.session_state.theme = mode
+
+light_css = """
+<style>
+/* Main app background */
+[data-testid="stAppViewContainer"] {
+    background-color: #e9e9e9 !important;   /* light grey */
+}
+
+/* Top toolbar background */
+[data-testid="stToolbar"] {
+    background-color: #e9e9e9 !important;
+}
+
+/* Sidebar */
+section[data-testid="stSidebar"] {
+    background-color: #f5f5f5 !important;
+}
+
+/* Text color */
+html, body, div, p, span {
+    color: #000000 !important;
+}
+
+/* Buttons */
+div.stButton > button {
+    background-color: #4CAF50 !important;
+    color: white !important;
+    border-radius: 8px !important;
+}
+</style>
+"""
+
+dark_css = """
+<style>
+body {
+    background-color: #0e1117;
+    color: #fafafa;
+}
+section[data-testid="stSidebar"] {
+    background-color: #1a1d23 !important;
+}
+div.stButton > button {
+    background-color: #4CAF50 !important;
+    color: white !important;
+}
+</style>
+"""
+
+st.markdown(light_css if st.session_state.theme == "light" else dark_css, unsafe_allow_html=True)
+#Done
+
 
 st.title("Welcome to Moodify! 🎧")
 
@@ -49,6 +108,14 @@ if st.session_state.spotify is None:
             st.session_state.user_country = user.get("country")
             st.session_state.logged_in = True
 
+            st.success("Spotify connected!")
+            st.balloons()
+
+            placeholder = st.empty()
+            time.sleep(2)
+            placeholder.empty()  
+
+            # continue loading the rest of the app
             st.rerun()
         except Exception as e:
             st.error(f"Failed to connect to Spotify: {e}")
@@ -62,7 +129,7 @@ st.markdown(
     """,
 )
 
-st.success("Spotify connected!")
+#st.success("Spotify connected!")
 
 mode = st.radio("Choose your playlist's behavior", ["Match my mood — keep your current vibe", "Change my mood — cheer up or calm down"])
 
