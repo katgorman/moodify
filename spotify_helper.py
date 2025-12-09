@@ -1,284 +1,245 @@
-# spotify_helper.py 
+# spotify_helper.py
+
 import spotipy
 from spotipy.oauth2 import SpotifyOAuth
+import numpy as np
+from typing import List, Dict, Any
+import math
+import os
 
-MOOD_CHANGE_MAP = {
-    "happy":   "relaxed",    # too hyped... relax
-    "sad":     "happy",      # cheer up
-    "angry":   "relaxed",    # calm down
-    "anxious": "relaxed",    # soothe
-    "relaxed": "happy",      # energize
+# scopes required: top tracks + recently played + playlist creation
+SCOPES = "user-top-read user-read-recently-played playlist-modify-public playlist-modify-private user-library-read"
+
+# map each high-level emotion to heuristic target audio features.
+# values are approximate... you can tune per your taste.
+EMOTION_TO_FEATURES = {
+    "happy":    {"valence": 0.9, "energy": 0.8, "tempo": 120.0, "danceability": 0.7},
+    "sad":      {"valence": 0.15, "energy": 0.25, "tempo": 70.0, "danceability": 0.25},
+    "relaxed":  {"valence": 0.5, "energy": 0.35, "tempo": 75.0, "danceability": 0.35, "acousticness": 0.6},
+    "anxious":  {"valence": 0.35, "energy": 0.45, "tempo": 85.0, "danceability": 0.3},
+    "angry":    {"valence": 0.2, "energy": 0.95, "tempo": 140.0, "danceability": 0.5},
+    "neutral":  {"valence": 0.5, "energy": 0.5, "tempo": 100.0, "danceability": 0.5}
 }
-
-
-EMOTION_FEATURES = {
-    "happy":    {"target_valence": 0.9, "target_energy": 0.85, "min_tempo": 100, "max_tempo": 160},
-    "sad":      {"target_valence": 0.15, "target_energy": 0.2,  "min_tempo": 50,  "max_tempo": 90},
-    "relaxed":  {"target_valence": 0.5, "target_energy": 0.3,  "min_tempo": 60,  "max_tempo": 110, "target_acousticness": 0.7},
-    "anxious":  {"target_valence": 0.4, "target_energy": 0.5,  "min_tempo": 80,  "max_tempo": 140, "target_danceability": 0.3},
-    "angry":    {"target_valence": 0.1, "target_energy": 0.95, "min_tempo": 90,  "max_tempo": 160, "target_loudness": -5.0},
-}
-
-SCOPE = "playlist-modify-private playlist-modify-public user-read-private"
 
 def get_spotify_client():
-    """Return an authenticated Spotify client."""
-    return spotipy.Spotify(auth_manager=SpotifyOAuth(scope=SCOPE))
-
-
-def normalize_ids(seeds):
     """
-    Accepts a list of:
-      - track dicts (with 'id' or 'uri')
-      - track URIs: spotify:track:<id>
-      - spotify track URLs: https://open.spotify.com/track/<id>
-      - plain 22-char track IDs
-    Returns list of cleaned strings (prefer URIs if available, otherwise IDs).
+    Initialize and return a Spotipy client using environment variables or
+    Streamlit secrets for SPOTIPY_CLIENT_ID / SECRET / REDIRECT_URI.
     """
-    cleaned = []
-    for s in seeds or []:
-        if not s:
+    client_id = os.environ.get("SPOTIPY_CLIENT_ID")
+    client_secret = os.environ.get("SPOTIPY_CLIENT_SECRET")
+    redirect_uri = os.environ.get("SPOTIPY_REDIRECT_URI", "http://localhost:8888/callback")
+    if not client_id or not client_secret:
+        raise RuntimeError("SPOTIPY_CLIENT_ID and SPOTIPY_CLIENT_SECRET must be set in environment.")
+    auth_manager = SpotifyOAuth(client_id=client_id, client_secret=client_secret, redirect_uri=redirect_uri, scope=SCOPES)
+    return spotipy.Spotify(auth_manager=auth_manager)
+
+# fetch user top & recent track objects
+def get_user_top_and_recent_track_objects(sp: spotipy.Spotify, top_limit=30, time_range="medium_term", recent_limit=30) -> List[Dict[str,Any]]:
+    """
+    Returns a deduplicated list of track objects (as returned by sp.track / sp.current_user_top_tracks / sp.current_user_recently_played)
+    Preference is given to top tracks, then recently played. We return up to top_limit + recent_limit unique tracks.
+    """
+    candidates = []
+    seen_ids = set()
+
+    # fetch top tracks
+    try:
+        top = sp.current_user_top_tracks(limit=top_limit, time_range=time_range)
+        for t in top.get("items", []):
+            if t and t.get("id") and t["id"] not in seen_ids:
+                candidates.append(t)
+                seen_ids.add(t["id"])
+    except Exception:
+        # silently ignore; try recent tracks next
+        top = None
+
+    # fetch recently played
+    try:
+        recent = sp.current_user_recently_played(limit=recent_limit)
+        for item in recent.get("items", []):
+            tr = item.get("track") if isinstance(item, dict) else None
+            if tr and tr.get("id") and tr["id"] not in seen_ids:
+                candidates.append(tr)
+                seen_ids.add(tr["id"])
+    except Exception:
+        recent = None
+
+    return candidates
+
+# audio features fetching
+def fetch_audio_features_map(sp: spotipy.Spotify, track_ids: List[str]) -> Dict[str, Dict[str, Any]]:
+    features_map = {}
+    batch_size = 50
+
+    for i in range(0, len(track_ids), batch_size):
+        chunk = track_ids[i:i + batch_size]
+
+        try:
+            feats = sp.audio_features(chunk)
+        except Exception as e:
+            print(f"Audio feature batch failed: {e}")
             continue
-        # dict with id or uri
-        if isinstance(s, dict):
-            if s.get("uri"):
-                cleaned.append(s["uri"])
-            elif s.get("id"):
-                cleaned.append(s["id"])
-            continue
-        if not isinstance(s, str):
-            continue
-        s = s.strip()
-        # spotify URI
-        if s.startswith("spotify:track:"):
-            cleaned.append(s)
-            continue
-        # spotify web url
-        if "open.spotify.com/track/" in s:
-            try:
-                _id = s.split("track/")[1].split("?")[0]
-                cleaned.append(_id)
+
+        for f in feats:
+            if not f or not f.get("id"):
                 continue
-            except Exception:
-                cleaned.append(s)
-                continue
-        # 22-char id
-        if len(s) == 22 and all(c.isalnum() or c in "-_" for c in s):
-            cleaned.append(s)
-            continue
-        # fallback: keep the string (Spotify endpoints accept URIs or IDs)
-        cleaned.append(s)
-    return cleaned
 
+            features_map[f["id"]] = {
+                "id": f["id"],
+                "valence": f.get("valence", 0.5),
+                "energy": f.get("energy", 0.5),
+                "tempo": f.get("tempo", 100.0),
+                "danceability": f.get("danceability", 0.5),
+                "acousticness": f.get("acousticness", 0.0),
+                "instrumentalness": f.get("instrumentalness", 0.0),
+                "liveness": f.get("liveness", 0.0),
+            }
 
-def recommend_tracks(
-    sp,
-    market=None,
-    top_tracks=None,
-    seed_tracks=None,
-    change_mood=None,
-    limit=20,
-    fallback_genres=("pop", "indie", "rock"),
-    debug=False,
-):
+    return features_map
+
+# build target features vector from emotion label and desired behavior
+def build_target_features_from_emotion(emotion_label: str, behavior="match"):
     """
-    Robust recommendation generator.
-
-    Improvements over original:
-    - no hardcoded US market (optional market detection)
-    - seed normalization accepts URIs/IDs/objects
-    - validate tracks more carefully (without depending on market)
-    - multiple fallbacks including search
-    - detailed logging (enable debug=True)
+    Return a target feature dict based on emotion_label and behavior:
+      - if behavior == "match": the feature target is the emotion mapping unchanged.
+      - if behavior == "change": we push away from the emotion toward a 'cheer up' or 'calm down' variant.
+    This is a heuristic function; tune values as desired.
     """
-    def log(*args):
-        if debug:
-            print("[recommend_tracks]", *args)
+    base = EMOTION_TO_FEATURES.get(emotion_label, EMOTION_TO_FEATURES["neutral"]).copy()
 
-    def validate_track(track_id_or_uri):
-        """
-        Return the full track object if playable, else None.
-        We call sp.track without passing market to avoid strict market filtering.
-        """
-        try:
-            # extract id if a spotify: URI was provided
-            if isinstance(track_id_or_uri, str) and track_id_or_uri.startswith("spotify:track:"):
-                tid = track_id_or_uri.split("spotify:track:")[1]
-            else:
-                tid = track_id_or_uri
-            t = sp.track(tid)
-            if not t:
-                log("validate_track: no track object for", tid)
-                return None
-            if t.get("is_playable") is False:
-                log("validate_track: is_playable False for", tid)
-                return None
-            if t.get("restrictions", {}).get("reason") in ("market", "premium"):
-                log("validate_track: restricted for", tid, "reason:", t.get("restrictions", {}).get("reason"))
-                return None
-            if not t.get("uri"):
-                log("validate_track: no uri for", tid)
-                return None
-            return t
-        except Exception as e:
-            log("validate_track exception for", track_id_or_uri, e)
-            return None
+    if behavior == "match":
+        return base
 
-    def safe_recs(**kwargs):
-        try:
-            r = sp.recommendations(limit=limit, **{k: v for k, v in kwargs.items() if v is not None})
-            if isinstance(r, dict):
-                log("safe_recs called:", {k: (type(v).__name__ if k in ('seed_tracks','seed_genres') else v) for k,v in kwargs.items()}, "-> tracks:", len(r.get("tracks", [])))
-            else:
-                log("safe_recs returned non-dict:", type(r))
-            return r
-        except Exception as e:
-            log("safe_recs exception:", e)
-            return None
+    # if 'change' behavior, choose a target that shifts mood.
+    # rules:
+    # - if user is sad/anxious/angry: push toward 'happy' or 'relaxed'
+    # - if user is happy/relaxed: push toward a slightly different optimistic/energetic variant
+    if emotion_label in ("sad", "anxious", "angry"):
+        # cheer up: lean toward 'happy' but keep some attributes of current emotion removed
+        happy = EMOTION_TO_FEATURES["happy"]
+        # blend: 30% original, 70% happy
+        blended = {
+            "valence": 0.3 * base["valence"] + 0.7 * happy["valence"],
+            "energy": 0.3 * base["energy"] + 0.7 * happy["energy"],
+            "tempo": 0.3 * base["tempo"] + 0.7 * happy["tempo"],
+            "danceability": 0.3 * base.get("danceability", 0.5) + 0.7 * happy.get("danceability", 0.5)
+        }
+        return blended
 
-    # normalize incoming seeds (IDs/URIs/dicts)
-    raw_seeds = normalize_ids(seed_tracks or top_tracks or [])
-    log("raw_seeds:", raw_seeds)
+    # if currently happy: calm down / relax slightly
+    if emotion_label == "happy":
+        relaxed = EMOTION_TO_FEATURES["relaxed"]
+        blended = {
+            "valence": 0.6 * base["valence"] + 0.4 * relaxed["valence"],
+            "energy": 0.6 * base["energy"] + 0.4 * relaxed["energy"],
+            "tempo": 0.6 * base["tempo"] + 0.4 * relaxed["tempo"],
+            "danceability": 0.6 * base.get("danceability", 0.5) + 0.4 * relaxed.get("danceability", 0.5)
+        }
+        return blended
 
-    # validate seed tracks (and collect playable track objects)
-    valid_seed_objs = []
-    for s in raw_seeds:
-        t = validate_track(s)
-        if t:
-            valid_seed_objs.append(t)
-    valid_seeds = []
-    # convert to acceptable seed format for recommendations: use track IDs (not URIs)
-    for t in valid_seed_objs[:5]:
-        if t.get("id"):
-            valid_seeds.append(t["id"])
-    log("valid_seeds (IDs):", valid_seeds)
-
-    # prepare mood kwargs safely (only if change_mood matches EMOTION_FEATURES)
-    mood_kwargs = {}
-    if isinstance(change_mood, str) and change_mood in EMOTION_FEATURES:
-        mood_kwargs = {k: v for k, v in EMOTION_FEATURES[change_mood].items() if v is not None}
-    log("change_mood:", change_mood, "mood_kwargs:", mood_kwargs)
-
-    # 1) try validated seed tracks (if any)
-    if valid_seeds:
-        log("Attempting recommendations with seed_tracks:", valid_seeds)
-        result = safe_recs(seed_tracks=valid_seeds, **mood_kwargs)
-        if result and result.get("tracks"):
-            log("Got tracks from seed_tracks fallback:", len(result["tracks"]))
-            return result
-        log("No tracks returned with validated seed_tracks.")
-
-    # 2) try fallback genres
-    log("Attempting recommendations with seed_genres:", fallback_genres)
-    result = safe_recs(seed_genres=list(fallback_genres), **mood_kwargs)
-    if result and result.get("tracks"):
-        log("Got tracks from fallback_genres:", len(result["tracks"]))
-        return result
-    log("No tracks returned from fallback_genres.")
-
-    # 3) try focused 'pop' genre
-    log("Attempting emergency seed_genres=['pop']")
-    result = safe_recs(seed_genres=["pop"], **mood_kwargs)
-    if result and result.get("tracks"):
-        log("Got tracks from seed_genres=['pop']:", len(result["tracks"]))
-        return result
-    log("No tracks returned from seed_genres=['pop'].")
-
-    # 4) search-based fallback: look up popular artists/tracks and return first playable
-    log("Attempting search-based fallback.")
-    search_queries = [
-        "Taylor Swift", "The Beatles", "Ed Sheeran", "Billie Eilish", "Coldplay",
-        "Adele", "Drake", "BTS", "The Weeknd", "Bruno Mars"
-    ]
-    for q in search_queries:
-        try:
-            s = sp.search(q, limit=8, type="track")
-            tracks = s.get("tracks", {}).get("items", []) if isinstance(s, dict) else []
-            log(f"search('{q}') found {len(tracks)} tracks")
-            for t in tracks:
-                playable = validate_track(t.get("id"))
-                if playable:
-                    log("Found playable search fallback:", playable.get("name"), "by", ", ".join(a["name"] for a in playable.get("artists", [])[:2]))
-                    return {"tracks": [playable]}
-        except Exception as e:
-            log("search exception for", q, e)
-
-    # 5) last-ditch known-good track ids (try a few popular ids)
-    log("Attempting known-good track IDs fallback.")
-    known_good_ids = [
-        "3KkXRkHbMCARz0aVfEt68P",  # Sunflower (Post Malone & Swae Lee)
-        "4aWmUDTfIPGksMNLV2rQP2",  # Believer (Imagine Dragons)
-        "0e7ipj03S05BNilyu5bRzt",  # Hotline Bling snippet etc (examples)
-    ]
-    for kid in known_good_ids:
-        try:
-            t = validate_track(kid)
-            if t:
-                log("Returning known-good track id:", kid)
-                return {"tracks": [t]}
-        except Exception as e:
-            log("known-good exception", kid, e)
-
-    # 6) exhausted fallback options... return empty list
-    log("All fallbacks exhausted — returning {'tracks': []}")
-    return {"tracks": []}
+    # fallback: return neutral-ish shift
+    neutral = EMOTION_TO_FEATURES["neutral"]
+    blended = {
+        "valence": 0.5 * base["valence"] + 0.5 * neutral["valence"],
+        "energy": 0.5 * base["energy"] + 0.5 * neutral["energy"],
+        "tempo": 0.5 * base["tempo"] + 0.5 * neutral["tempo"],
+        "danceability": 0.5 * base.get("danceability", 0.5) + 0.5 * neutral.get("danceability", 0.5)
+    }
+    return blended
 
 
-def create_playlist_and_add_tracks(sp, user_id, name, track_ids, description=None):
+# scoring & sampling
+def _feature_vector_from_feat_dict(feat_dict: Dict[str,Any]):
     """
-    Accepts a list of track URIs or IDs or track dicts and creates a playlist,
-    adding up to 100 items per request chunk. Raises ValueError if no valid items.
+    Convert feature dict into a numeric vector for distance calculations.
+    We'll normalize tempo into 0..1 by dividing by 200 (reasonable upper bound).
+    Order: [valence, energy, tempo_norm, danceability]
     """
-    # normalize incoming list to URIs or IDs
-    items = normalize_ids(track_ids or [])
-    # convert IDs to URIs where possible (Spotify API accepts either, but URIs are safe)
+    return np.array([
+        feat_dict.get("valence", 0.5),
+        feat_dict.get("energy", 0.5),
+        feat_dict.get("tempo", 100.0) / 200.0,
+        feat_dict.get("danceability", 0.5)
+    ], dtype=float)
+
+def score_and_sample_tracks(features_list: List[Dict[str,Any]], k=10, target: Dict[str,float]=None, seed=None):
+    """
+    - features_list: list of audio feature dicts (each must include 'id' and fields used)
+    - target: dict with same keys (valence, energy, tempo, danceability)
+    Returns: list of sampled indices (indices refer to features_list order)
+    Method:
+      - compute Euclidean distance from each candidate to target vector
+      - convert distances to softmax probabilities (smaller distance => larger prob)
+      - sample k unique indices according to probabilities
+    """
+    if not features_list:
+        return []
+
+    if seed is not None:
+        np.random.seed(seed)
+
+    target_vec = np.array([target.get("valence",0.5), target.get("energy",0.5), target.get("tempo",100.0)/200.0, target.get("danceability",0.5)])
+    data = np.array([_feature_vector_from_feat_dict(f) for f in features_list])
+
+    # compute distances
+    dists = np.linalg.norm(data - target_vec[np.newaxis, :], axis=1)
+    # convert to scores (smaller dist -> higher score). Use a temperature-like scaling to control randomness.
+    # scale = median(dists) so distances larger than median get low weights.
+    scale = max(np.median(dists), 1e-6)
+    scores = np.exp(-dists / (scale * 0.9))  # 0.9 to sharpen slightly
+    probs = scores / np.sum(scores)
+
+    # if fewer than k candidates, just return all indices
+    n = len(features_list)
+    k_choose = min(k, n)
+    # sample without replacement
+    chosen = np.random.choice(n, size=k_choose, replace=False, p=probs)
+    return list(chosen)
+
+
+# playlist creation & helpers
+def create_playlist_and_add_tracks(sp: spotipy.Spotify, user_id: str, name: str, track_uris: List[str], description: str = ""):
+    """
+    Create a playlist for the user and add the provided track URIs.
+    Accepts either URIs like "spotify:track:<id>" or track IDs; we'll convert IDs to URIs when needed.
+    """
+    # normalize URIs
     prepared = []
-    for it in items:
-        if isinstance(it, str) and it.startswith("spotify:track:"):
-            prepared.append(it)
-        elif isinstance(it, str) and len(it) == 22:
-            prepared.append(f"spotify:track:{it}")
-        elif isinstance(it, str) and "open.spotify.com/track/" in it:
+    for t in track_uris:
+        if not t:
+            continue
+        if isinstance(t, str) and t.startswith("spotify:track:"):
+            prepared.append(t)
+        elif isinstance(t, str) and len(t) == 22:
+            prepared.append(f"spotify:track:{t}")
+        elif isinstance(t, str) and "open.spotify.com/track/" in t:
             try:
-                tid = it.split("track/")[1].split("?")[0]
+                tid = t.split("track/")[1].split("?")[0]
                 prepared.append(f"spotify:track:{tid}")
             except Exception:
-                prepared.append(it)
-        elif isinstance(it, dict) and it.get("uri"):
-            prepared.append(it["uri"])
+                prepared.append(t)
         else:
-            # fallback: keep as-is hoping it's an ID or uri
-            prepared.append(it)
+            prepared.append(t)
 
-    # filter falsy
-    prepared = [p for p in prepared if p]
-    if not prepared:
-        raise ValueError("No valid track URIs/IDs to add to playlist.")
-
-    # create playlist
-    playlist = sp.user_playlist_create(
-        user=user_id,
-        name=name,
-        public=False,
-        description=description or ""
-    )
-
+    # create playlist (private by default)
+    pl = sp.user_playlist_create(user=user_id, name=name, public=False, description=description or "")
     # add in chunks of 100
     for i in range(0, len(prepared), 100):
         chunk = prepared[i:i+100]
-        sp.playlist_add_items(playlist_id=playlist["id"], items=chunk)
+        sp.playlist_add_items(playlist_id=pl["id"], items=chunk)
+    return pl
 
-    return playlist
-
-
-def explain_track_features(track, emotion=None):
-    """Return a simplified dictionary of key track info."""
+def explain_track_features(track_obj: Dict, emotion=None) -> Dict:
+    """
+    Build a small dict for UI display. track_obj is Spotify track object.
+    """
     return {
-        "name": track.get("name"),
-        "artists": ", ".join([a["name"] for a in track.get("artists", [])]),
-        "id": track.get("id"),
-        "uri": track.get("uri"),
-        "popularity": track.get("popularity"),
-        "preview_url": track.get("preview_url"),
+        "name": track_obj.get("name"),
+        "artists": ", ".join([a.get("name") for a in track_obj.get("artists", [])]) if track_obj.get("artists") else "",
+        "id": track_obj.get("id"),
+        "uri": track_obj.get("uri"),
+        "preview_url": track_obj.get("preview_url"),
+        "popularity": track_obj.get("popularity"),
         "related_emotion": emotion
     }
