@@ -3,7 +3,7 @@ from ollama import Client
 TARGET_EMOTIONS = ["happy", "sad", "relaxed", "anxious", "angry", "neutral"]
 
 class EmotionDetector:
-    def __init__(self, model_name="llama3.2:1b"):
+    def __init__(self, model_name="mistral:7b"):
         self.client = Client()
         self.model_name = model_name
 
@@ -11,10 +11,21 @@ class EmotionDetector:
         # prompt the model to classify user-stated mood
         resp = self.client.generate(
             model=self.model_name,
-            prompt=(
-                "You are a rule-based emotion classifier.\n\nThe user is directly describing THEIR CURRENT MOOD in plain language.\n\nCLASSIFY ONLY ONE MOOD from this fixed list:\nhappy, sad, relaxed, anxious, angry, neutral\n\nRULES:\n- Output ONLY the mood word, all lowercase.\n- No sentences, no punctuation, no explanation.\n- If multiple moods are implied, choose the most explicit one.\n- If the text describes physical tension, fear, worry, or stress → anxious.\n- If the text contains words like upset, pissed, irritated → angry.\n- If the mood is unclear or mixed → neutral.\n\nUser text:\n\"{text}\"\n\nAnswer with only one word from the list."
-
+            prompt= (
+                "You are a classifier. Read the user's text and choose exactly ONE mood from "
+                "[happy, sad, relaxed, anxious, angry, neutral].\n"
+                "\n"
+                "The user is describing their own emotional state. You are classifying the user's mood.\n"
+                "Rules:\n"
+                "- Output only the mood word.\n"
+                "- Lowercase.\n"
+                "- No punctuation.\n"
+                "- No explanations.\n"
+                "\n"
+                "User text: \"{text}\"\n"
+                "Answer:"
             )
+
         )
         # resp.response contains the text output
         mood = resp.response.strip().lower()
