@@ -1,4 +1,4 @@
-# Moodify --- Emotion-Aware Spotify Playlist Generator
+# Moodify: Emotion-Aware Spotify Playlist Generator
 
 Moodify is a Streamlit web app that generates Spotify playlists based on
 your current mood, detected from natural language using a large language
