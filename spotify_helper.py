@@ -1,245 +1,212 @@
 # spotify_helper.py
 
+import os
+import pathlib
+from dotenv import load_dotenv
+load_dotenv(override=True)
 import spotipy
 from spotipy.oauth2 import SpotifyOAuth
 import numpy as np
-from typing import List, Dict, Any
-import math
-import os
+import time
 
-# scopes required: top tracks + recently played + playlist creation
-SCOPES = "user-top-read user-read-recently-played playlist-modify-public playlist-modify-private user-library-read"
+# define the Spotify API scopes needed for the app
+SCOPES = (
+    "user-top-read "
+    "user-read-recently-played "
+    "user-read-private "
+    "user-read-email "
+    "user-library-read "
+    "playlist-read-private "
+    "playlist-modify-public "
+    "playlist-modify-private"
+)
 
-# map each high-level emotion to heuristic target audio features.
-# values are approximate... you can tune per your taste.
-EMOTION_TO_FEATURES = {
-    "happy":    {"valence": 0.9, "energy": 0.8, "tempo": 120.0, "danceability": 0.7},
-    "sad":      {"valence": 0.15, "energy": 0.25, "tempo": 70.0, "danceability": 0.25},
-    "relaxed":  {"valence": 0.5, "energy": 0.35, "tempo": 75.0, "danceability": 0.35, "acousticness": 0.6},
-    "anxious":  {"valence": 0.35, "energy": 0.45, "tempo": 85.0, "danceability": 0.3},
-    "angry":    {"valence": 0.2, "energy": 0.95, "tempo": 140.0, "danceability": 0.5},
-    "neutral":  {"valence": 0.5, "energy": 0.5, "tempo": 100.0, "danceability": 0.5}
+# map music genres to moods
+GENRE_TO_MOOD = {
+    "pop": "happy", "dance": "happy", "edm": "happy",
+    "rock": "angry", "metal": "angry", "punk": "angry",
+    "jazz": "relaxed", "blues": "relaxed", "classical": "relaxed",
+    "ambient": "relaxed", "folk": "happy", "rap": "angry",
+    "hip hop": "anxious", "r&b": "relaxed", "country": "happy",
+    "sad": "sad", "melancholy": "sad", "reggae": "relaxed", 
+    "alternative rock": "happy", "grunge": "angry", "lo-fi": "relaxed",
+    "latin": "happy", "soul": "relaxed"
+
 }
 
-def get_spotify_client():
-    """
-    Initialize and return a Spotipy client using environment variables or
-    Streamlit secrets for SPOTIPY_CLIENT_ID / SECRET / REDIRECT_URI.
-    """
+# function to get an authenticated Spotify client
+def get_spotify_client(cache_path=".cache-moodify"):
+    # import Streamlit inside function to access session_state
+    import streamlit as st
+    # get Spotify client ID from environment
     client_id = os.environ.get("SPOTIPY_CLIENT_ID")
+    # get Spotify client secret from environment
     client_secret = os.environ.get("SPOTIPY_CLIENT_SECRET")
+    # get redirect URI from environment or use default
     redirect_uri = os.environ.get("SPOTIPY_REDIRECT_URI", "http://localhost:8888/callback")
-    if not client_id or not client_secret:
-        raise RuntimeError("SPOTIPY_CLIENT_ID and SPOTIPY_CLIENT_SECRET must be set in environment.")
-    auth_manager = SpotifyOAuth(client_id=client_id, client_secret=client_secret, redirect_uri=redirect_uri, scope=SCOPES)
+
+    # resolve cache path to absolute path
+    cache_path = str(pathlib.Path(cache_path).resolve())
+    # create OAuth manager
+    auth_manager = SpotifyOAuth(client_id, client_secret, redirect_uri, scope=SCOPES, cache_path=cache_path, show_dialog=True)
+
+    # get token info from session state
+    token_info = st.session_state.get("sp_token_info")
+    # if no token info, get a new access token
+    if not token_info:
+        token_info = auth_manager.get_access_token(as_dict=True)
+        st.session_state.sp_token_info = token_info
+    # if token expired, refresh it
+    elif auth_manager.is_token_expired(token_info):
+        token_info = auth_manager.refresh_access_token(token_info["refresh_token"])
+        st.session_state.sp_token_info = token_info
+
+    # return authenticated Spotify client
     return spotipy.Spotify(auth_manager=auth_manager)
 
-# fetch user top & recent track objects
-def get_user_top_and_recent_track_objects(sp: spotipy.Spotify, top_limit=30, time_range="medium_term", recent_limit=30) -> List[Dict[str,Any]]:
-    """
-    Returns a deduplicated list of track objects (as returned by sp.track / sp.current_user_top_tracks / sp.current_user_recently_played)
-    Preference is given to top tracks, then recently played. We return up to top_limit + recent_limit unique tracks.
-    """
-    candidates = []
-    seen_ids = set()
-
-    # fetch top tracks
-    try:
-        top = sp.current_user_top_tracks(limit=top_limit, time_range=time_range)
-        for t in top.get("items", []):
-            if t and t.get("id") and t["id"] not in seen_ids:
-                candidates.append(t)
-                seen_ids.add(t["id"])
-    except Exception:
-        # silently ignore; try recent tracks next
-        top = None
-
-    # fetch recently played
-    try:
-        recent = sp.current_user_recently_played(limit=recent_limit)
-        for item in recent.get("items", []):
-            tr = item.get("track") if isinstance(item, dict) else None
-            if tr and tr.get("id") and tr["id"] not in seen_ids:
-                candidates.append(tr)
-                seen_ids.add(tr["id"])
-    except Exception:
-        recent = None
-
-    return candidates
-
-# audio features fetching
-def fetch_audio_features_map(sp: spotipy.Spotify, track_ids: List[str]) -> Dict[str, Dict[str, Any]]:
-    features_map = {}
-    batch_size = 50
-
-    for i in range(0, len(track_ids), batch_size):
-        chunk = track_ids[i:i + batch_size]
-
+# wrapper for Spotify API calls with retries and error handling
+def safe_spotify_call(sp, func, *args, max_retries=2, backoff=0.3, **kwargs):
+    # loop for retry attempts
+    for attempt in range(max_retries + 1):
         try:
-            feats = sp.audio_features(chunk)
-        except Exception as e:
-            print(f"Audio feature batch failed: {e}")
-            continue
-
-        for f in feats:
-            if not f or not f.get("id"):
+            # attempt API call
+            return func(*args, **kwargs)
+        except spotipy.exceptions.SpotifyException as e:
+            # get HTTP status code
+            status = getattr(e, "http_status", None)
+            # handle 401/403 by refreshing token
+            if status in (401, 403):
+                try:
+                    auth = getattr(sp, "auth_manager", None)
+                    if auth:
+                        token_info = auth.get_cached_token()
+                        if token_info:
+                            auth.refresh_access_token(token_info['refresh_token'])
+                except Exception:
+                    pass
+                # wait before retrying
+                time.sleep(backoff * (attempt + 1))
                 continue
-
-            features_map[f["id"]] = {
-                "id": f["id"],
-                "valence": f.get("valence", 0.5),
-                "energy": f.get("energy", 0.5),
-                "tempo": f.get("tempo", 100.0),
-                "danceability": f.get("danceability", 0.5),
-                "acousticness": f.get("acousticness", 0.0),
-                "instrumentalness": f.get("instrumentalness", 0.0),
-                "liveness": f.get("liveness", 0.0),
-            }
-
-    return features_map
-
-# build target features vector from emotion label and desired behavior
-def build_target_features_from_emotion(emotion_label: str, behavior="match"):
-    """
-    Return a target feature dict based on emotion_label and behavior:
-      - if behavior == "match": the feature target is the emotion mapping unchanged.
-      - if behavior == "change": we push away from the emotion toward a 'cheer up' or 'calm down' variant.
-    This is a heuristic function; tune values as desired.
-    """
-    base = EMOTION_TO_FEATURES.get(emotion_label, EMOTION_TO_FEATURES["neutral"]).copy()
-
-    if behavior == "match":
-        return base
-
-    # if 'change' behavior, choose a target that shifts mood.
-    # rules:
-    # - if user is sad/anxious/angry: push toward 'happy' or 'relaxed'
-    # - if user is happy/relaxed: push toward a slightly different optimistic/energetic variant
-    if emotion_label in ("sad", "anxious", "angry"):
-        # cheer up: lean toward 'happy' but keep some attributes of current emotion removed
-        happy = EMOTION_TO_FEATURES["happy"]
-        # blend: 30% original, 70% happy
-        blended = {
-            "valence": 0.3 * base["valence"] + 0.7 * happy["valence"],
-            "energy": 0.3 * base["energy"] + 0.7 * happy["energy"],
-            "tempo": 0.3 * base["tempo"] + 0.7 * happy["tempo"],
-            "danceability": 0.3 * base.get("danceability", 0.5) + 0.7 * happy.get("danceability", 0.5)
-        }
-        return blended
-
-    # if currently happy: calm down / relax slightly
-    if emotion_label == "happy":
-        relaxed = EMOTION_TO_FEATURES["relaxed"]
-        blended = {
-            "valence": 0.6 * base["valence"] + 0.4 * relaxed["valence"],
-            "energy": 0.6 * base["energy"] + 0.4 * relaxed["energy"],
-            "tempo": 0.6 * base["tempo"] + 0.4 * relaxed["tempo"],
-            "danceability": 0.6 * base.get("danceability", 0.5) + 0.4 * relaxed.get("danceability", 0.5)
-        }
-        return blended
-
-    # fallback: return neutral-ish shift
-    neutral = EMOTION_TO_FEATURES["neutral"]
-    blended = {
-        "valence": 0.5 * base["valence"] + 0.5 * neutral["valence"],
-        "energy": 0.5 * base["energy"] + 0.5 * neutral["energy"],
-        "tempo": 0.5 * base["tempo"] + 0.5 * neutral["tempo"],
-        "danceability": 0.5 * base.get("danceability", 0.5) + 0.5 * neutral.get("danceability", 0.5)
-    }
-    return blended
-
-
-# scoring & sampling
-def _feature_vector_from_feat_dict(feat_dict: Dict[str,Any]):
-    """
-    Convert feature dict into a numeric vector for distance calculations.
-    We'll normalize tempo into 0..1 by dividing by 200 (reasonable upper bound).
-    Order: [valence, energy, tempo_norm, danceability]
-    """
-    return np.array([
-        feat_dict.get("valence", 0.5),
-        feat_dict.get("energy", 0.5),
-        feat_dict.get("tempo", 100.0) / 200.0,
-        feat_dict.get("danceability", 0.5)
-    ], dtype=float)
-
-def score_and_sample_tracks(features_list: List[Dict[str,Any]], k=10, target: Dict[str,float]=None, seed=None):
-    """
-    - features_list: list of audio feature dicts (each must include 'id' and fields used)
-    - target: dict with same keys (valence, energy, tempo, danceability)
-    Returns: list of sampled indices (indices refer to features_list order)
-    Method:
-      - compute Euclidean distance from each candidate to target vector
-      - convert distances to softmax probabilities (smaller distance => larger prob)
-      - sample k unique indices according to probabilities
-    """
-    if not features_list:
-        return []
-
-    if seed is not None:
-        np.random.seed(seed)
-
-    target_vec = np.array([target.get("valence",0.5), target.get("energy",0.5), target.get("tempo",100.0)/200.0, target.get("danceability",0.5)])
-    data = np.array([_feature_vector_from_feat_dict(f) for f in features_list])
-
-    # compute distances
-    dists = np.linalg.norm(data - target_vec[np.newaxis, :], axis=1)
-    # convert to scores (smaller dist -> higher score). Use a temperature-like scaling to control randomness.
-    # scale = median(dists) so distances larger than median get low weights.
-    scale = max(np.median(dists), 1e-6)
-    scores = np.exp(-dists / (scale * 0.9))  # 0.9 to sharpen slightly
-    probs = scores / np.sum(scores)
-
-    # if fewer than k candidates, just return all indices
-    n = len(features_list)
-    k_choose = min(k, n)
-    # sample without replacement
-    chosen = np.random.choice(n, size=k_choose, replace=False, p=probs)
-    return list(chosen)
-
-
-# playlist creation & helpers
-def create_playlist_and_add_tracks(sp: spotipy.Spotify, user_id: str, name: str, track_uris: List[str], description: str = ""):
-    """
-    Create a playlist for the user and add the provided track URIs.
-    Accepts either URIs like "spotify:track:<id>" or track IDs; we'll convert IDs to URIs when needed.
-    """
-    # normalize URIs
-    prepared = []
-    for t in track_uris:
-        if not t:
+            else:
+                # raise for other errors
+                raise
+        except Exception:
+            # wait before retrying for other exceptions
+            time.sleep(backoff * (attempt + 1))
             continue
-        if isinstance(t, str) and t.startswith("spotify:track:"):
-            prepared.append(t)
-        elif isinstance(t, str) and len(t) == 22:
-            prepared.append(f"spotify:track:{t}")
-        elif isinstance(t, str) and "open.spotify.com/track/" in t:
-            try:
+    # raise if all retries fail
+    raise RuntimeError("Spotify API call failed after retries.")
+
+# fetch candidate tracks from user's top, recent, and saved tracks
+def get_user_candidate_tracks(sp, top_limit=50, recent_limit=50, saved_limit=50):
+    # initialize empty candidates list and seen set
+    candidates, seen = [], set()
+    # helper to add track if not already seen or local
+    def add(t):
+        tid = t.get("id")
+        if tid and tid not in seen and not t.get("is_local", False):
+            candidates.append(t)
+            seen.add(tid)
+
+    # iterate over top, recent, and saved track functions and limits
+    for items_func, limit in [(sp.current_user_top_tracks, top_limit),
+                              (sp.current_user_recently_played, recent_limit),
+                              (sp.current_user_saved_tracks, saved_limit)]:
+        try:
+            # get tracks safely
+            items = safe_spotify_call(sp, items_func, limit=limit).get("items", [])
+            for it in items:
+                # extract track from item if present
+                t = it.get("track") if "track" in it else it
+                if t: add(t)
+        except Exception:
+            continue
+
+    # return candidate tracks and empty diagnostics dict
+    return candidates, {}
+
+# fetch genres for a given track
+def get_track_genres(sp, track):
+    # initialize set for genres
+    genres = set()
+    # iterate over track artists
+    for artist in track.get("artists", []):
+        artist_id = artist.get("id")
+        if not artist_id: continue
+        try:
+            # get artist info safely
+            artist_info = safe_spotify_call(sp, sp.artist, artist_id)
+            # add each genre in lowercase
+            for g in artist_info.get("genres", []):
+                genres.add(g.lower())
+        except Exception:
+            continue
+    # return genres as list
+    return list(genres)
+
+# score and sample tracks based on genre matching and popularity
+def score_and_sample_tracks_by_genre_and_popularity(tracks, target_emotion, k=10, seed=None):
+    # return empty list if no tracks
+    if not tracks: return []
+    # set random seed if provided
+    if seed: np.random.seed(seed)
+    # initialize scores list
+    scores = []
+    # iterate over tracks
+    for tr in tracks:
+        # get mapped genres for track
+        genres = tr.get("mapped_genres", [])
+        # calculate match score
+        match_score = sum(1 for g in genres if GENRE_TO_MOOD.get(g, "") == target_emotion) / max(len(genres),1)
+        # get normalized popularity
+        popularity = tr.get("popularity", 0) / 100.0
+        # combine match score and popularity
+        scores.append(0.7*match_score + 0.3*popularity)
+    # calculate probabilities for sampling
+    probs = np.array(scores) / np.sum(scores) if np.sum(scores) > 0 else np.ones(len(tracks))/len(tracks)
+    # sample indices
+    chosen = np.random.choice(len(tracks), size=min(k,len(tracks)), replace=False, p=probs)
+    # return sampled tracks
+    return [tracks[i] for i in chosen]
+
+# create playlist and add tracks to Spotify
+def create_playlist_and_add_tracks(sp, user_id, name, track_uris, description=""):
+    # initialize list for prepared track URIs
+    prepared = []
+    # iterate over track URIs
+    for t in track_uris:
+        if isinstance(t,str):
+            # add URI directly if already full URI
+            if t.startswith("spotify:track:"): prepared.append(t)
+            # format short ID
+            elif len(t)==22: prepared.append(f"spotify:track:{t}")
+            # extract ID from URL
+            elif "open.spotify.com/track/" in t:
                 tid = t.split("track/")[1].split("?")[0]
                 prepared.append(f"spotify:track:{tid}")
-            except Exception:
-                prepared.append(t)
-        else:
-            prepared.append(t)
-
-    # create playlist (private by default)
-    pl = sp.user_playlist_create(user=user_id, name=name, public=False, description=description or "")
-    # add in chunks of 100
-    for i in range(0, len(prepared), 100):
-        chunk = prepared[i:i+100]
-        sp.playlist_add_items(playlist_id=pl["id"], items=chunk)
+    # create playlist safely
+    pl = safe_spotify_call(sp, sp.user_playlist_create, user_id, name, public=False, description=description)
+    # add tracks in batches of 100
+    for i in range(0,len(prepared),100):
+        safe_spotify_call(sp, sp.playlist_add_items, pl["id"], prepared[i:i+100])
+    # return playlist object
     return pl
 
-def explain_track_features(track_obj: Dict, emotion=None) -> Dict:
-    """
-    Build a small dict for UI display. track_obj is Spotify track object.
-    """
+# format track features for display
+def explain_track_features(track_obj, emotion=None):
     return {
+        # track name
         "name": track_obj.get("name"),
+        # track artists as comma-separated string
         "artists": ", ".join([a.get("name") for a in track_obj.get("artists", [])]) if track_obj.get("artists") else "",
+        # track ID
         "id": track_obj.get("id"),
+        # track URI
         "uri": track_obj.get("uri"),
+        # track preview URL
         "preview_url": track_obj.get("preview_url"),
+        # track popularity
         "popularity": track_obj.get("popularity"),
+        # related emotion
         "related_emotion": emotion
     }

@@ -5,3 +5,4 @@ spotipy>=2.22
 numpy
 pandas
 python-dotenv
+ollama

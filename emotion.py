@@ -1,59 +1,26 @@
-# emotion.py
-
-from transformers import pipeline
-
-# map many HF labels into our target mood categories
-LABEL_MAP = {
-    "joy": "happy",
-    "happiness": "happy",
-    "love": "happy",
-    "surprise": "happy",
-    "sadness": "sad",
-    "sad": "sad",
-    "anger": "angry",
-    "anger/annoyance": "angry",
-    "fear": "anxious",
-    "anxiety": "anxious",
-    "relief": "relaxed",
-    "calm": "relaxed",
-    "neutral": "neutral"
-}
+from ollama import Client
 
 TARGET_EMOTIONS = ["happy", "sad", "relaxed", "anxious", "angry", "neutral"]
 
 class EmotionDetector:
-    def __init__(self, model_name=None):
-        # default model is relatively small and good for emotion classification
-        model_name = model_name or "j-hartmann/emotion-english-distilroberta-base"
-        # Use return_all_scores to get probabilities for all labels
-        self.pipe = pipeline("text-classification", model=model_name, return_all_scores=True, truncation=True)
+    def __init__(self, model_name="llama3.2:1b"):
+        self.client = Client()
+        self.model_name = model_name
+
+    def detect_current_mood(self, text: str):
+        # prompt the model to classify user-stated mood
+        resp = self.client.generate(
+            model=self.model_name,
+            prompt=(
+                "You are a rule-based emotion classifier.\n\nThe user is directly describing THEIR CURRENT MOOD in plain language.\n\nCLASSIFY ONLY ONE MOOD from this fixed list:\nhappy, sad, relaxed, anxious, angry, neutral\n\nRULES:\n- Output ONLY the mood word, all lowercase.\n- No sentences, no punctuation, no explanation.\n- If multiple moods are implied, choose the most explicit one.\n- If the text describes physical tension, fear, worry, or stress → anxious.\n- If the text contains words like upset, pissed, irritated → angry.\n- If the mood is unclear or mixed → neutral.\n\nUser text:\n\"{text}\"\n\nAnswer with only one word from the list."
+
+            )
+        )
+        # resp.response contains the text output
+        mood = resp.response.strip().lower()
+        if mood not in TARGET_EMOTIONS:
+            mood = "neutral"
+        return mood
 
     def predict(self, text: str):
-        """
-        Predict emotion distribution over our TARGET_EMOTIONS.
-        Returns:
-           {"scores": {emotion:score, ...}, "top": top_emotion_label, "top_score": top_score}
-        """
-        # the HF pipeline returns a list of dicts for the example: take the first element
-        raw = self.pipe(text)[0]  # list of {label, score}
-        # initialize zeroed distribution
-        scores = {e: 0.0 for e in TARGET_EMOTIONS}
-        # accumulate probabilities mapping raw labels into our target emotions
-        for entry in raw:
-            label = entry["label"].lower()
-            score = float(entry["score"])
-            mapped = LABEL_MAP.get(label, None)
-            if mapped and mapped in scores:
-                scores[mapped] += score
-            else:
-                # if unmapped label is already in our target set, add it directly
-                if label in scores:
-                    scores[label] += score
-        # normalize
-        s = sum(scores.values())
-        if s > 0:
-            for k in scores:
-                scores[k] /= s
-        # pick top
-        top = max(scores.items(), key=lambda x: x[1])
-        return {"scores": scores, "top": top[0], "top_score": top[1]}
+        return {"top": self.detect_current_mood(text)}
