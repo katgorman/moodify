@@ -9,11 +9,11 @@ builds a personalized playlist using your current mood listening habits.
 
 ## Features
 
--   AI-powered emotion detection from text prompts\
--   Spotify integration using your real top, recent, and saved tracks\
--   Mood-based track scoring using genres and popularity\
--   Match or change your mood with one click\
--   One-click playlist creation directly in Spotify\
+-   AI-powered emotion detection from text prompts
+-   Spotify integration using your real top, recent, and saved tracks
+-   Mood-based track scoring using genres and popularity
+-   Match or change your mood with one click
+-   One-click playlist creation directly in Spotify
 -   Optional random seed for reproducibility
 
 ------------------------------------------------------------------------
